@@ -25,3 +25,8 @@
   cause: process.tsx handleDenoise creates a DeepFilterNet and never calls release(); recording flow already releases via ref
   solution: OP7 patch 001 — declare denoiser outside try, release() in finally (session is null-safe)
   tags: [memory-leak, onnx, stability, patch-001]
+- id: DD5b
+  problem: deepdenoiser CI build fails compiling @siteed/audio-studio (Promise.reject override mismatch)
+  cause: fresh bun.lock resolved siteed 3.2.1; its reject(String?,...) no longer matches expo-modules-core Promise.reject(String,...); upstream patch-package patches target 3.0.3
+  solution: pin @siteed/audio-studio to 3.0.3 in overrides/bun.lock; verify compile passes
+  tags: [onnx, build, siteed, lockfile, compile-error]

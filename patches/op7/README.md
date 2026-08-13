@@ -6,5 +6,6 @@ Applied in filename order over the pinned upstream commit (`upstream/commit.txt`
 |---|---|---|---|---|---|
 | `001-release-inference-session.patch` | release the ONNX `InferenceSession` in `finally` after every denoise job | upstream leaks one 13 MB ORT session per job (recording flow releases; processing flow did not) — memory grows across repeated denoises on OP7 | upstream 531b8a8 (leak present) | patch applies cleanly; CI build + badging green | KEEP |
 | (lockfile, not a patch) | `overrides/bun.lock` pin | upstream ships no lockfile; reproducibility | no lock | frozen installs in CI | KEEP |
+| `002` (lockfile pin) | pin `@siteed/audio-studio@3.0.3` | 3.2.1's `reject(String?, …)` override doesn't match expo-modules-core `Promise` interface → compile error | siteed 3.2.1 fails to build | pin via lockfile (see patch) | KEEP |
 
 Every future optimization follows `docs/optimization.md` (one measured change per revision).
