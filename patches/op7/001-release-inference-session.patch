@@ -1,0 +1,35 @@
+diff --git a/src/app/processing/process.tsx b/src/app/processing/process.tsx
+index e805d2e..1de0c67 100644
+--- a/src/app/processing/process.tsx
++++ b/src/app/processing/process.tsx
+@@ -129,6 +129,7 @@ export default function ProcessScreen() {
+     setProgressText("Initializing...");
+     setEta(null);
+     setDenoisedFile(null);
++    let denoiser: DeepFilterNet | null = null;
+     try {
+       const startTime = Date.now();
+       setProgressText("Extracting audio...");
+@@ -170,7 +171,7 @@ export default function ProcessScreen() {
+       }
+ 
+       setProgressText("Optimizing AI model...");
+-      const denoiser = new DeepFilterNet();
++      denoiser = new DeepFilterNet();
+       const modelAsset = Asset.fromModule(
+         require("@/assets/model/denoiser_model.ort"),
+       );
+@@ -314,6 +315,13 @@ export default function ProcessScreen() {
+       setIsErrorModalVisible(true);
+       trackAppError(err, { context: "handleDenoise" });
+     } finally {
++      if (denoiser) {
++        try {
++          await denoiser.release();
++        } catch (e) {
++          console.error("Failed to release denoiser:", e);
++        }
++      }
+       setDenoising(false);
+       setProgressText("");
+       setEta(null);

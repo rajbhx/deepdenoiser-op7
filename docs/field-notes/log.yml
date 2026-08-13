@@ -20,3 +20,8 @@
   cause: injected testOnly flag / per-build debug keystore
   solution: aapt badging gate rejects testOnly; stable DEBUG_SIGNING_KEY secret for consistent signatures
   tags: [android10, install, testonly, signing]
+- id: DD5
+  problem: repeated denoise jobs grow memory on OP7 (one InferenceSession leaked per job)
+  cause: process.tsx handleDenoise creates a DeepFilterNet and never calls release(); recording flow already releases via ref
+  solution: OP7 patch 001 — declare denoiser outside try, release() in finally (session is null-safe)
+  tags: [memory-leak, onnx, stability, patch-001]

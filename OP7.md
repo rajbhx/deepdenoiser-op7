@@ -9,6 +9,7 @@ Target: OnePlus 7 (GM1901, Snapdragon 855, Adreno 640, arm64-v8a, Android 10/API
 |---|---|---|---|---|
 | r1: none (unmodified upstream) | Level 0/1 compatibility baseline; upstream already targets arm64-v8a, minSdk 24, NDK 28.1 | upstream 531b8a8… | APK builds in CI, badging passes | KEEP |
 | r1: `overrides/bun.lock` pin | upstream ships no lockfile; pin deps for reproducibility | no lock | frozen installs in CI | KEEP |
+| r1: `001` release ONNX session after each job | stability fix: upstream leaks one 13 MB ORT session per denoise (processing screen never calls `release()`; recording screen does) | leak present (unbounded growth over repeated denoises) | session released in `finally`; CI green | KEEP (maintenance, not a perf claim) |
 | r2 (planned) | ONNX thread tuning / EP selection | on-device baseline required | — | pending |
 
 ## Compatibility matrix (OP7 / Android 10)
