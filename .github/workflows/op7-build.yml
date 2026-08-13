@@ -171,7 +171,6 @@ jobs:
           [[ -n "$APK" ]] || { echo "::error::no APK produced"; exit 1; }
           echo "apk=$APK" >> "$GITHUB_OUTPUT"
           echo "APK_PATH=$APK" >> "$GITHUB_ENV"
-          cp "$APK" "dist-$(basename "$APK")"
           "$GITHUB_WORKSPACE/automation/op7/validate_apk.sh" "$APK" "$GITHUB_WORKSPACE"
 
       - name: Upload validation artifacts
@@ -223,7 +222,7 @@ jobs:
         with:
           name: op7-signed-${{ steps.metadata.outputs.version_name }}
           path: |
-            ${{ github.workspace }}/dist-*.apk
+            ${{ github.workspace }}/*.apk
             SHA256SUMS.txt
             apk-metadata.json
             build-metadata.json
