@@ -1,0 +1,297 @@
+name: OP7 Build
+
+# DeepDenoiser OP7 pipeline (Phases 3, 9).
+# - Mirrors the pinned upstream commit (or an explicit one) into mirror/, copies
+#   build-config overrides (pinned bun.lock), applies patches/op7 (fail=stop),
+#   then: bun install -> expo prebuild -> Gradle assemble (debug fast / release full).
+# - Validation gates: source sync, patch apply, dependency resolution, compile,
+#   APK structural validity (aapt badging: package, SDK, native-code arm64-v8a,
+#   lib/<abi>, NOT testOnly), checksums, metadata.
+# - release=true publishes a GitHub Release from the `release` job only, under the
+#   `release` environment; signing secrets are guarded by presence checks.
+#
+# Security: workflow_dispatch only (maintainers). PRs from untrusted forks never
+# reach this workflow or its secrets.
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_commit:
+        description: 'Upstream commit to build (default: pinned in upstream/commit.txt)'
+        required: false
+        default: ''
+      patch_ref:
+        description: 'Ref of this repo to test (e.g. refs/pull/42/head); default = default branch'
+        required: false
+        default: ''
+      release:
+        description: 'Create a GitHub Release (requires release_tag + release secrets)'
+        required: false
+        default: 'false'
+      release_tag:
+        description: 'Release tag, format op7-<app-version>-r<rev> (required if release=true)'
+        required: false
+        default: ''
+      fast:
+        description: 'Fast validation build (assembleDebug, no R8); use for iteration, NOT for release evidence'
+        required: false
+        default: 'true'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: op7-build-${{ github.event.inputs.upstream_commit || 'pinned' }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Mirror, patch, build, validate
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_commit: ${{ steps.resolve.outputs.upstream_commit }}
+      version_name: ${{ steps.metadata.outputs.version_name }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.patch_ref || '' }}
+          fetch-depth: 0
+
+      - name: Resolve upstream commit and release inputs
+        id: resolve
+        run: |
+          if [[ -n "${{ github.event.inputs.upstream_commit }}" ]]; then
+            UPSTREAM_COMMIT="${{ github.event.inputs.upstream_commit }}"
+          else
+            UPSTREAM_COMMIT="$(cat upstream/commit.txt)"
+          fi
+          echo "upstream_commit=$UPSTREAM_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "Resolved upstream commit: $UPSTREAM_COMMIT"
+
+          if [[ "${{ github.event.inputs.release }}" == "true" ]]; then
+            TAG="${{ github.event.inputs.release_tag }}"
+            if [[ -z "$TAG" ]]; then
+              echo "::error::release=true requires release_tag (format op7-<version>-r<rev>)"
+              exit 1
+            fi
+            echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout upstream at pinned commit
+        run: |
+          UPSTREAM_COMMIT="${{ steps.resolve.outputs.upstream_commit }}"
+          git clone https://github.com/sayampy/deepdenoiser.git mirror
+          git -C mirror checkout "$UPSTREAM_COMMIT"
+          echo "upstream commit: $(git -C mirror rev-parse HEAD)"
+          echo "app version: $(node -p "require('./mirror/package.json').version")"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: 17
+          distribution: temurin
+
+      - name: Setup NDK (r28b = 28.1.13356709, as pinned upstream)
+        uses: nttld/setup-ndk@v1.6
+        with:
+          ndk-version: r28b
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache Bun packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ hashFiles('mirror/bun.lock') }}
+          restore-keys: |
+            bun-
+
+      - name: Apply OP7 layer (overrides + patches, fails closed)
+        run: |
+          cd mirror
+          OP7_LAYER_DIR="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/automation/op7/apply_patches.sh"
+
+      - name: Install dependencies (frozen lockfile)
+        run: |
+          cd mirror
+          CI=1 bun install --frozen-lockfile
+
+      - name: Prebuild Android project
+        env:
+          CI: '1'
+          EXPO_NO_TELEMETRY: '1'
+        run: |
+          cd mirror
+          bunx expo prebuild --platform android --no-install
+          test -f android/gradlew && echo "android project generated"
+
+      - name: Collect build metadata
+        id: metadata
+        run: |
+          UPSTREAM_COMMIT="${{ steps.resolve.outputs.upstream_commit }}"
+          REV="$(tr -d '[:space:]' < op7-revision.txt)"
+          APP_VERSION="$(node -p "require('./mirror/package.json').version")"
+          VERSION_NAME="deepdenoiser-${APP_VERSION}-op7r${REV}"
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          cat > build-metadata.json << JSON
+          {
+            "project": "deepdenoiser-op7",
+            "upstream_commit": "$UPSTREAM_COMMIT",
+            "app_version": "$APP_VERSION",
+            "op7_revision": "r$REV",
+            "version_name": "$VERSION_NAME",
+            "abi": "arm64-v8a",
+            "min_sdk": 24,
+            "target_sdk": 36,
+            "build": "${{ github.event.inputs.fast == 'true' && 'fast (assembleDebug, no R8)' || 'full (assembleRelease, R8)' }}",
+            "run_id": "${{ github.run_id }}"
+          }
+          JSON
+          cat build-metadata.json
+
+      - name: Build APK (Gradle)
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        run: |
+          cd mirror/android
+          if [[ "${{ github.event.inputs.fast }}" == "true" ]]; then
+            ./gradlew :app:assembleDebug --no-daemon --stacktrace
+          else
+            ./gradlew :app:assembleRelease -x lint -x lintVitalRelease --no-daemon --stacktrace
+          fi
+
+      - name: Discover APK and validate (aapt badging gate)
+        id: validate
+        run: |
+          APK="$(find mirror/android/app/build/outputs/apk -name '*.apk' | sort | head -n 1)"
+          [[ -n "$APK" ]] || { echo "::error::no APK produced"; exit 1; }
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
+          cp "$APK" "dist-$(basename "$APK")"
+          "$GITHUB_WORKSPACE/automation/op7/validate_apk.sh" "$APK" "$GITHUB_WORKSPACE"
+
+      - name: Upload validation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: op7-validation-${{ steps.metadata.outputs.version_name }}
+          path: |
+            ${{ env.APK_PATH }}
+            SHA256SUMS.txt
+            apk-metadata.json
+            build-metadata.json
+          retention-days: 7
+
+      - name: Resolve build-tools version
+        id: buildtools
+        if: secrets.DEBUG_SIGNING_KEY != ''
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          BT="$(find "$SDK_ROOT/build-tools/" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tail -n 1)"
+          echo "BUILD_TOOLS_VERSION=$BT" >> "$GITHUB_ENV"
+          echo "using build-tools $BT"
+
+      - name: Re-sign APK with stable debug key (validation builds)
+        if: github.event.inputs.release != 'true' && secrets.DEBUG_SIGNING_KEY != ''
+        uses: abhijitvalluri/sign-apks@v0.8
+        env:
+          BUILD_TOOLS_VERSION: ${{ env.BUILD_TOOLS_VERSION }}
+        with:
+          releaseDirectory: ${{ github.workspace }}/
+          signingKeyBase64: ${{ secrets.DEBUG_SIGNING_KEY }}
+          alias: ${{ secrets.DEBUG_ALIAS }}
+          keyStorePassword: ${{ secrets.DEBUG_KEY_STORE_PASSWORD }}
+          keyPassword: ${{ secrets.DEBUG_KEY_PASSWORD }}
+
+      - name: Upload installable APK (validation builds)
+        if: github.event.inputs.release != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: op7-signed-${{ steps.metadata.outputs.version_name }}
+          path: |
+            ${{ github.workspace }}/dist-*.apk
+            SHA256SUMS.txt
+            apk-metadata.json
+            build-metadata.json
+          retention-days: 14
+
+      - name: Write job summary
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << 'SUMMARY'
+          ## OP7 build report — DeepDenoiser
+          - upstream commit: `${{ steps.resolve.outputs.upstream_commit }}`
+          - version: `${{ steps.metadata.outputs.version_name }}`
+          - ABI: `arm64-v8a` | minSdk 24 | targetSdk 36
+          - patch status: applied by `automation/op7/apply_patches.sh` (fail = stopped)
+          - validation: aapt badging + native-lib ABI + testOnly gate + SHA-256
+          - build mode: ${{ github.event.inputs.fast == 'true' && 'fast (assembleDebug, no R8)' || 'full (assembleRelease, R8)' }}
+          SUMMARY
+
+  release:
+    name: Sign with release key and publish
+    needs: build
+    if: github.event.inputs.release == 'true'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Guard release secrets
+        run: |
+          for SECRET in OP7_RELEASE_KEYSTORE_BASE64 OP7_RELEASE_KEYSTORE_PASSWORD OP7_RELEASE_KEY_ALIAS OP7_RELEASE_KEY_PASSWORD; do
+            if [[ -z "${!SECRET:-}" ]]; then
+              echo "::error::$SECRET is not configured; refusing to publish"
+              exit 1
+            fi
+          done
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: op7-validation-${{ needs.build.outputs.version_name }}
+          path: release-artifacts
+
+      - name: Resolve build-tools version
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          BT="$(find "$SDK_ROOT/build-tools/" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tail -n 1)"
+          echo "BUILD_TOOLS_VERSION=$BT" >> "$GITHUB_ENV"
+          echo "using build-tools $BT"
+
+      - name: Sign APK with dedicated release key
+        uses: abhijitvalluri/sign-apks@v0.8
+        env:
+          BUILD_TOOLS_VERSION: ${{ env.BUILD_TOOLS_VERSION }}
+        with:
+          releaseDirectory: release-artifacts/
+          signingKeyBase64: ${{ secrets.OP7_RELEASE_KEYSTORE_BASE64 }}
+          alias: ${{ secrets.OP7_RELEASE_KEY_ALIAS }}
+          keyStorePassword: ${{ secrets.OP7_RELEASE_KEYSTORE_PASSWORD }}
+          keyPassword: ${{ secrets.OP7_RELEASE_KEY_PASSWORD }}
+
+      - name: Final checksums and metadata
+        run: |
+          cd release-artifacts
+          sha256sum ./*.apk | tee SHA256SUMS.txt
+          ls -la
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.release_tag }}
+          name: "DeepDenoiser OP7 ${{ needs.build.outputs.version_name }}"
+          body: |
+            ## DeepDenoiser OP7 release
+            - upstream commit: `${{ needs.build.outputs.upstream_commit }}`
+            - version: `${{ needs.build.outputs.version_name }}`
+            - target ABI: `arm64-v8a` | Android 10 OK (minSdk 24)
+            - artifacts: APK + `SHA256SUMS.txt` + `apk-metadata.json` + `build-metadata.json`
+          files: |
+            release-artifacts/*.apk
+            release-artifacts/SHA256SUMS.txt
+            release-artifacts/apk-metadata.json
+            release-artifacts/build-metadata.json
+          fail_on_unmatched_files: true

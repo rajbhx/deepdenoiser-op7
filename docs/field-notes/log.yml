@@ -1,0 +1,22 @@
+# DeepDenoiser OP7 field notes (schema per playbook: id/problem/cause/solution/tags)
+# Auto-consumed by the playbook sync workflow; one entry per line, short and factual.
+- id: DD1
+  problem: upstream deepdenoiser ships no dependency lockfile
+  cause: bun.lockb/bun.lock gitignored upstream (expo/rn convention)
+  solution: pin deps in overrides/bun.lock copied into the CI mirror before bun install --frozen-lockfile
+  tags: [reproducibility, expo, bun, lockfile]
+- id: DD2
+  problem: eas build --local requires EAS project ownership/token, unavailable to a new build repo
+  cause: upstream CI depends on EAS cloud credentials
+  solution: replace eas with expo prebuild + plain gradle assemble in the OP7 pipeline; no EAS dependency
+  tags: [ci, expo, eas, github-actions]
+- id: DD3
+  problem: ONNX runtime native libs require matching NDK/ABI or gradle fails
+  cause: onnxruntime-react-native builds JNI via CMake; arm64-v8a only
+  solution: mirror upstream proven combo: Java 17 + NDK r28b + app.json buildArchs arm64-v8a; badging gate checks lib/arm64-v8a
+  tags: [onnx, ndk, arm64, badging]
+- id: DD4
+  problem: android 10 install can fail on testOnly or signature mismatch
+  cause: injected testOnly flag / per-build debug keystore
+  solution: aapt badging gate rejects testOnly; stable DEBUG_SIGNING_KEY secret for consistent signatures
+  tags: [android10, install, testonly, signing]

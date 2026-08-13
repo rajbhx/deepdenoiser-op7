@@ -1,0 +1,14 @@
+# Build outputs (never commit APKs/binaries)
+*.apk
+*.aab
+*.keystore
+*.jks
+*.p8
+*.p12
+*.key
+mirror/
+android/
+node_modules/
+build/
+dist/
+*.log
