@@ -115,6 +115,7 @@ jobs:
             echo "no DEBUG_SIGNING_KEY secret; using per-build auto-generated keystore"
           fi
 
+      - name: Cache Bun packages
         uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache
